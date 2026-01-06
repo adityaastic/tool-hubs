@@ -104,8 +104,10 @@ export const pdfToWord = asyncHandler(async (req, res) => {
     } catch (e) {
       throw new ApiError(503, `LibreOffice not available or failed: ${e.message}`);
     }
-    const outPath = path.join(dir, "input.docx");
-    const buf = await readFileBuffer(outPath);
+    const files = await listFiles(dir);
+    const docx = files.find(f => f.toLowerCase().endsWith(".docx"));
+    if (!docx) throw new ApiError(500, "Conversion succeeded but output .docx not found");
+    const buf = await readFileBuffer(docx);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
     res.setHeader("Content-Disposition", `attachment; filename="converted.docx"`);
     res.status(200).end(buf);
@@ -127,8 +129,10 @@ export const wordToPdf = asyncHandler(async (req, res) => {
     } catch (e) {
       throw new ApiError(503, `LibreOffice not available or failed: ${e.message}`);
     }
-    const outPath = path.join(dir, name.replace(/\.docx?$/i, ".pdf"));
-    const buf = await readFileBuffer(outPath);
+    const files = await listFiles(dir);
+    const pdf = files.find(f => f.toLowerCase().endsWith(".pdf"));
+    if (!pdf) throw new ApiError(500, "Conversion succeeded but output .pdf not found");
+    const buf = await readFileBuffer(pdf);
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="converted.pdf"`);
     res.status(200).end(buf);
