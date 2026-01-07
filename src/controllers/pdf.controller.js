@@ -104,8 +104,16 @@ export const pdfToWord = asyncHandler(async (req, res) => {
     } catch (e) {
       throw new ApiError(503, `LibreOffice not available or failed: ${e.message}`);
     }
-    const files = await listFiles(dir);
-    const docx = files.find(f => f.toLowerCase().endsWith(".docx"));
+    let files = await listFiles(dir);
+    let docx = files.find(f => f.toLowerCase().endsWith(".docx"));
+    if (!docx) {
+      const odt = files.find(f => f.toLowerCase().endsWith(".odt"));
+      if (odt) {
+        await runCmd(soffice, ["--headless", "--convert-to", "docx", odt, "--outdir", dir], dir);
+        files = await listFiles(dir);
+        docx = files.find(f => f.toLowerCase().endsWith(".docx"));
+      }
+    }
     if (!docx) throw new ApiError(500, "Conversion succeeded but output .docx not found");
     const buf = await readFileBuffer(docx);
     res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.wordprocessingml.document");
