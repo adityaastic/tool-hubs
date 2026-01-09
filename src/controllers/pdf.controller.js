@@ -100,19 +100,27 @@ export const pdfToWord = asyncHandler(async (req, res) => {
     const inPath = await writeTempFile(dir, "input.pdf", file.buffer);
     const soffice = process.env.SOFFICE_BIN || "soffice";
     try {
-      await runCmd(soffice, ["--headless", "--convert-to", "docx", inPath, "--outdir", dir], dir);
+      await runCmd(soffice, ["--headless", `--infilter=writer_pdf_import`, "--convert-to", "docx:MS Word 2007 XML", inPath, "--outdir", dir], dir);
     } catch (e) {
       throw new ApiError(503, `LibreOffice not available or failed: ${e.message}`);
     }
     let files = await listFiles(dir);
     let docx = files.find(f => f.toLowerCase().endsWith(".docx"));
     if (!docx) {
-      const odt = files.find(f => f.toLowerCase().endsWith(".odt"));
-      if (odt) {
-        await runCmd(soffice, ["--headless", "--convert-to", "docx", odt, "--outdir", dir], dir);
+      try {
+        await runCmd(soffice, ["--headless", `--infilter=writer_pdf_import`, "--convert-to", "odt:writer_pdf_import", inPath, "--outdir", dir], dir);
         files = await listFiles(dir);
-        docx = files.find(f => f.toLowerCase().endsWith(".docx"));
-      }
+        const odt = files.find(f => f.toLowerCase().endsWith(".odt"));
+        if (odt) {
+          await runCmd(soffice, ["--headless", "--convert-to", "docx:MS Word 2007 XML", odt, "--outdir", dir], dir);
+          files = await listFiles(dir);
+          docx = files.find(f => f.toLowerCase().endsWith(".docx"));
+        }
+      } catch {}
+    }
+    if (!docx) {
+      const cwdFiles = await listFiles(process.cwd());
+      docx = cwdFiles.find(f => f.toLowerCase().endsWith(".docx"));
     }
     if (!docx) throw new ApiError(500, "Conversion succeeded but output .docx not found");
     const buf = await readFileBuffer(docx);
@@ -133,7 +141,7 @@ export const wordToPdf = asyncHandler(async (req, res) => {
     const inPath = await writeTempFile(dir, name, file.buffer);
     const soffice = process.env.SOFFICE_BIN || "soffice";
     try {
-      await runCmd(soffice, ["--headless", "--convert-to", "pdf", inPath, "--outdir", dir], dir);
+      await runCmd(soffice, ["--headless", "--convert-to", "pdf:writer_pdf_Export", inPath, "--outdir", dir], dir);
     } catch (e) {
       throw new ApiError(503, `LibreOffice not available or failed: ${e.message}`);
     }
