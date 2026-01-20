@@ -431,6 +431,347 @@ export const metaTagAnalyzer = asyncHandler(async (req, res) => {
   }
 });
 
+export const grammarChecker = asyncHandler(async (req, res) => {
+  const { text, language = "en-US" } = req.body;
+  if (!text) {
+    return res.status(400).json(new ApiResponse(400, null, "Text is required"));
+  }
+  try {
+    const params = new URLSearchParams();
+    params.append("text", text);
+    params.append("language", language);
+    const r = await axios.post("https://api.languagetool.org/v2/check", params.toString(), {
+      headers: { "Content-Type": "application/x-www-form-urlencoded" }
+    });
+    const matches = (r.data?.matches || []).map(m => ({
+      message: m.message,
+      shortMessage: m.shortMessage || "",
+      offset: m.offset,
+      length: m.length,
+      replacements: (m.replacements || []).map(x => x.value),
+      rule: { id: m.rule?.id || "", description: m.rule?.description || "" }
+    }));
+    res.status(200).json(new ApiResponse(200, { count: matches.length, matches }, "Grammar check"));
+  } catch (e) {
+    const msg = e?.response?.data?.message || "Failed to check grammar";
+    res.status(500).json(new ApiResponse(500, null, msg));
+  }
+});
+
+const hfCall = async (model, input, headers, parameters = {}) => {
+  const base = process.env.HF_API_BASE || "https://router.huggingface.co";
+  const body = { inputs: input, parameters: { wait_for_model: true, ...parameters } };
+  try {
+    const r = await axios.post(
+      `${base}/models/${model}`,
+      body,
+      { headers }
+    );
+    return r.data;
+  } catch (e) {
+    const status = e?.response?.status;
+    if (status === 503) {
+      await new Promise(res => setTimeout(res, 1500));
+      const r2 = await axios.post(
+        `${base}/models/${model}`,
+        body,
+        { headers }
+      );
+      return r2.data;
+    }
+    throw e;
+  }
+};
+
+export const paraphraseText = asyncHandler(async (req, res) => {
+  const { text, numReturnSequences = 3, numBeams = 4, temperature = 0.7, apiKey } = req.body;
+  if (!text) {
+    return res.status(400).json(new ApiResponse(400, null, "Text is required"));
+  }
+  const bearer = req.headers.authorization && req.headers.authorization.startsWith("Bearer ") ? req.headers.authorization.slice(7) : "";
+  const token = apiKey || bearer || process.env.HUGGING_FACE_API_TOKEN || "";
+  const headers = token ? { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } : { "Content-Type": "application/json" };
+  try {
+    const data = await hfCall(
+      "prithivida/parrot_paraphraser_on_T5",
+      `paraphrase: ${text}`,
+      headers,
+      { num_return_sequences: numReturnSequences, num_beams: numBeams, temperature }
+    );
+    const variants = Array.isArray(data)
+      ? data
+          .flatMap(x => {
+            if (typeof x === "string") return [x];
+            if (x?.generated_text) return [x.generated_text];
+            if (Array.isArray(x) && x[0]?.generated_text) return [x[0].generated_text];
+            return [];
+          })
+          .filter(Boolean)
+      : [];
+    if (!variants.length) {
+      return res.status(502).json(new ApiResponse(502, null, "Paraphraser returned no variants"));
+    }
+    res.status(200).json(new ApiResponse(200, { variants }, "Paraphrases"));
+  } catch (e) {
+    const status = e?.response?.status;
+    const msg =
+      e?.response?.data?.error || e?.response?.data?.message || "Failed to paraphrase";
+    const code = status === 401 || status === 403 ? 401 : status === 429 ? 429 : 500;
+    res.status(code).json(new ApiResponse(code, null, msg || "Unauthorized. Provide apiKey or set HUGGING_FACE_API_TOKEN"));
+  }
+});
+
+export const sentenceRewriter = asyncHandler(async (req, res) => {
+  const { text, apiKey, numReturnSequences = 3, numBeams = 4, temperature = 0.7 } = req.body;
+  if (!text) {
+    return res.status(400).json(new ApiResponse(400, null, "Text is required"));
+  }
+  const bearer = req.headers.authorization && req.headers.authorization.startsWith("Bearer ") ? req.headers.authorization.slice(7) : "";
+  const provided = apiKey && String(apiKey).startsWith("hf_") ? apiKey : "";
+  const token = bearer && String(bearer).startsWith("hf_")
+    ? bearer
+    : provided || process.env.HUGGING_FACE_API_TOKEN || "";
+  if (!token) {
+    return res.status(401).json(new ApiResponse(401, null, "Hugging Face API token missing"));
+  }
+  const headers = token ? { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } : { "Content-Type": "application/json" };
+  try {
+    const data = await hfCall(
+      "Vamsi/T5_Paraphrase_Paws",
+      `paraphrase: ${text}`,
+      headers,
+      { num_return_sequences: numReturnSequences, num_beams: numBeams, temperature }
+    );
+    let variants = Array.isArray(data)
+      ? data
+          .flatMap(x => {
+            if (typeof x === "string") return [x];
+            if (x?.generated_text) return [x.generated_text];
+            if (Array.isArray(x) && x[0]?.generated_text) return [x[0].generated_text];
+            return [];
+          })
+          .filter(Boolean)
+      : [];
+    if (!variants.length) {
+      const data2 = await hfCall(
+        "eugenesiow/bart-paraphrase",
+        text,
+        headers,
+        { num_return_sequences: numReturnSequences, temperature }
+      );
+      variants = Array.isArray(data2)
+        ? data2
+            .flatMap(x => {
+              if (typeof x === "string") return [x];
+              if (x?.generated_text) return [x.generated_text];
+              if (Array.isArray(x) && x[0]?.generated_text) return [x[0].generated_text];
+              return [];
+            })
+            .filter(Boolean)
+        : [];
+      if (!variants.length) {
+        return res.status(502).json(new ApiResponse(502, null, "Rewriter returned no variants"));
+      }
+    }
+    return res.status(200).json(new ApiResponse(200, { variants }, "Sentence rewrites"));
+  } catch (e) {
+    const status = e?.response?.status;
+    try {
+      const data2 = await hfCall(
+        "eugenesiow/bart-paraphrase",
+        text,
+        headers,
+        { num_return_sequences: numReturnSequences, temperature }
+      );
+      const variants = Array.isArray(data2)
+        ? data2
+            .flatMap(x => {
+              if (typeof x === "string") return [x];
+              if (x?.generated_text) return [x.generated_text];
+              if (Array.isArray(x) && x[0]?.generated_text) return [x[0].generated_text];
+              return [];
+            })
+            .filter(Boolean)
+        : [];
+      if (!variants.length) {
+        const msg = e?.response?.data?.error || e?.response?.data?.message || "Failed to rewrite";
+        const code = status === 401 || status === 403 ? 401 : status === 429 ? 429 : 500;
+        return res.status(code).json(new ApiResponse(code, null, msg || "Unauthorized. Provide apiKey or set HUGGING_FACE_API_TOKEN"));
+      }
+      return res.status(200).json(new ApiResponse(200, { variants }, "Sentence rewrites"));
+    } catch (e2) {
+      const status2 = e2?.response?.status;
+      const msg2 = e2?.response?.data?.error || e2?.response?.data?.message || "Failed to rewrite";
+      const code2 = status2 === 401 || status2 === 403 ? 401 : status2 === 429 ? 429 : 500;
+      return res.status(code2).json(new ApiResponse(code2, null, msg2 || "Unauthorized. Provide apiKey or set HUGGING_FACE_API_TOKEN"));
+    }
+  }
+});
+
+
+export const aiContentDetector = asyncHandler(async (req, res) => {
+  const { text, apiKey } = req.body;
+  if (!text) {
+    return res.status(400).json(new ApiResponse(400, null, "Text is required"));
+  }
+  const bearer = req.headers.authorization && req.headers.authorization.startsWith("Bearer ") ? req.headers.authorization.slice(7) : "";
+  const token = apiKey || bearer || process.env.HUGGING_FACE_API_TOKEN || "";
+  const headers = token ? { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } : { "Content-Type": "application/json" };
+  try {
+    const data = await hfCall("roberta-base-openai-detector", text, headers, {});
+    const result = Array.isArray(data) ? data : [];
+    let label = result[0]?.label || "";
+    let score = result[0]?.score ?? 0;
+    const mapped =
+      label === "LABEL_1" ? "AI-generated" : label === "LABEL_0" ? "Human-written" : label;
+    const isAi = mapped === "AI-generated";
+    res.status(200).json(new ApiResponse(200, { label: mapped, score, isAi, raw: result }, "AI content detection"));
+  } catch (e) {
+    const status = e?.response?.status;
+    const msg =
+      e?.response?.data?.error || e?.response?.data?.message || "Failed to detect AI content";
+    const code = status === 401 || status === 403 ? 401 : status === 429 ? 429 : 500;
+    res.status(code).json(new ApiResponse(code, null, msg || "Unauthorized. Provide apiKey or set HUGGING_FACE_API_TOKEN"));
+  }
+});
+
+export const textSummarizer = asyncHandler(async (req, res) => {
+  const { text, minLength = 56, maxLength = 180, apiKey } = req.body;
+  if (!text) {
+    return res.status(400).json(new ApiResponse(400, null, "Text is required"));
+  }
+  const bearer = req.headers.authorization && req.headers.authorization.startsWith("Bearer ") ? req.headers.authorization.slice(7) : "";
+  const token = apiKey || bearer || process.env.HUGGING_FACE_API_TOKEN || "";
+  const headers = token ? { Authorization: `Bearer ${token}`, "Content-Type": "application/json" } : { "Content-Type": "application/json" };
+  try {
+    const data = await hfCall(
+      "facebook/bart-large-cnn",
+      text,
+      headers,
+      { min_length: minLength, max_length: maxLength }
+    );
+    let summary = "";
+    if (Array.isArray(data)) {
+      if (data[0]?.summary_text) summary = data[0].summary_text;
+      else if (typeof data[0] === "string") summary = data[0];
+    }
+    if (!summary) {
+      return res.status(502).json(new ApiResponse(502, null, "Summarizer returned no output"));
+    }
+    res.status(200).json(new ApiResponse(200, { summary }, "Summary"));
+  } catch (e) {
+    const status = e?.response?.status;
+    const msg =
+      e?.response?.data?.error || e?.response?.data?.message || "Failed to summarize";
+    const code = status === 401 || status === 403 ? 401 : status === 429 ? 429 : 500;
+    res.status(code).json(new ApiResponse(code, null, msg || "Unauthorized. Provide apiKey or set HUGGING_FACE_API_TOKEN"));
+  }
+});
+export const wordCounter = asyncHandler(async (req, res) => {
+  const { text } = req.body;
+  if (typeof text !== "string") {
+    return res.status(400).json(new ApiResponse(400, null, "Text is required"));
+  }
+  const chars = text.length;
+  const charsNoSpaces = text.replace(/\s+/g, "").length;
+  const words = (text.trim().match(/\S+/g) || []).length;
+  const lines = text.split(/\r?\n/).length;
+  const sentences = (text.match(/[^.!?]+[.!?]+/g) || []).length;
+  const paragraphs = (text.trim().split(/\r?\n\r?\n+/).filter(Boolean)).length || (chars ? 1 : 0);
+  const readingTimeMinutes = +(words / 200).toFixed(2);
+  res.status(200).json(
+    new ApiResponse(200, { chars, charsNoSpaces, words, lines, sentences, paragraphs, readingTimeMinutes }, "Counts computed")
+  );
+});
+
+export const caseConverter = asyncHandler(async (req, res) => {
+  const { text, mode = "lower" } = req.body;
+  if (typeof text !== "string") {
+    return res.status(400).json(new ApiResponse(400, null, "Text is required"));
+  }
+  let out = text;
+  const toTitle = s =>
+    s
+      .toLowerCase()
+      .split(/\s+/)
+      .map(w => w ? w[0].toUpperCase() + w.slice(1) : "")
+      .join(" ");
+  const toSentence = s =>
+    s
+      .toLowerCase()
+      .replace(/(^\s*[a-z])|([.!?]\s*[a-z])/g, m => m.toUpperCase());
+  if (mode === "upper") out = text.toUpperCase();
+  else if (mode === "lower") out = text.toLowerCase();
+  else if (mode === "title") out = toTitle(text);
+  else if (mode === "sentence") out = toSentence(text);
+  else if (mode === "toggle") out = text.split("").map(c => (c === c.toUpperCase() ? c.toLowerCase() : c.toUpperCase())).join("");
+  res.status(200).json(new ApiResponse(200, { result: out }, "Case converted"));
+});
+
+export const reverseText = asyncHandler(async (req, res) => {
+  const { text, mode = "chars" } = req.body;
+  if (typeof text !== "string") {
+    return res.status(400).json(new ApiResponse(400, null, "Text is required"));
+  }
+  let out;
+  if (mode === "words") {
+    out = text.split(/\s+/).reverse().join(" ");
+  } else {
+    out = text.split("").reverse().join("");
+  }
+  res.status(200).json(new ApiResponse(200, { result: out }, "Text reversed"));
+});
+
+export const morseCode = asyncHandler(async (req, res) => {
+  const { text, action = "encode" } = req.body;
+  if (typeof text !== "string") {
+    return res.status(400).json(new ApiResponse(400, null, "Text is required"));
+  }
+  const map = {
+    a: ".-", b: "-...", c: "-.-.", d: "-..", e: ".", f: "..-.", g: "--.", h: "....",
+    i: "..", j: ".---", k: "-.-", l: ".-..", m: "--", n: "-.", o: "---", p: ".--.",
+    q: "--.-", r: ".-.", s: "...", t: "-", u: "..-", v: "...-", w: ".--", x: "-..-",
+    y: "-.--", z: "--..", "0": "-----", "1": ".----", "2": "..---", "3": "...--",
+    "4": "....-", "5": ".....", "6": "-....", "7": "--...", "8": "---..", "9": "----.",
+    ".": ".-.-.-", ",": "--..--", "?": "..--..", "'": ".----.", "!": "-.-.--", "/": "-..-.",
+    "(": "-.--.", ")": "-.--.-", "&": ".-...", ":": "---...", ";": "-.-.-.", "=": "-...-",
+    "+": ".-.-.", "-": "-....-", "_": "..--.-", "\"": ".-..-.", "$": "...-..-", "@": ".--.-.",
+    " ": "/"
+  };
+  if (action === "encode") {
+    const out = text.toLowerCase().split("").map(ch => map[ch] ?? "").filter(Boolean).join(" ");
+    return res.status(200).json(new ApiResponse(200, { result: out }, "Encoded to Morse"));
+  } else {
+    const rev = Object.fromEntries(Object.entries(map).map(([k, v]) => [v, k]));
+    const out = text.split(" ").map(tok => rev[tok] ?? "").join("").replace(/\//g, " ");
+    return res.status(200).json(new ApiResponse(200, { result: out }, "Decoded from Morse"));
+  }
+});
+
+export const invisibleChar = asyncHandler(async (req, res) => {
+  const { text, action = "inject", char = "zwsp", every = 1 } = req.body;
+  if (typeof text !== "string") {
+    return res.status(400).json(new ApiResponse(400, null, "Text is required"));
+  }
+  const chars = {
+    zwsp: "\u200B",
+    zwnj: "\u200C",
+    zwj: "\u200D"
+  };
+  const ins = chars[char] || chars.zwsp;
+  if (action === "inject") {
+    const n = Math.max(1, Number(every) || 1);
+    let out = "";
+    for (let i = 0; i < text.length; i++) {
+      out += text[i];
+      if ((i + 1) % n === 0) out += ins;
+    }
+    return res.status(200).json(new ApiResponse(200, { result: out }, "Invisible chars injected"));
+  } else {
+    const out = text.replace(/[\u200B\u200C\u200D]/g, "");
+    return res.status(200).json(new ApiResponse(200, { result: out }, "Invisible chars removed"));
+  }
+});
 export const sitemapGenerator = asyncHandler(async (req, res) => {
   const { url } = req.body;
   if (!url) {
