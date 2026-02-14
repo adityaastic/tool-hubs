@@ -1,16 +1,47 @@
-import { PDFDocument } from "pdf-lib";
+import { PDFDocument, rgb } from "pdf-lib";
 import archiver from "archiver";
 import { asyncHandler } from "../utils/asyncHandler.js";
 import { ApiError } from "../utils/apiError.js";
 import { createTempDir, writeTempFile, removeDir, readFileBuffer, listFiles } from "../utils/temp.js";
-import { spawn } from "child_process";
+import { spawn, exec } from "child_process";
 import path from "path";
 import fs from "fs";
 import { createRequire } from 'module';
+import { promisify } from "node:util";
 
 const require = createRequire(import.meta.url);
 const muhammara = require('muhammara');
 const Recipe = muhammara.Recipe;
+const libre = require('libreoffice-convert');
+const pdfParse = require('pdf-parse');
+const PptxGenJS = require('pptxgenjs');
+const ExcelJS = require('exceljs');
+const pdf2excel = require('pdf-to-excel');
+
+console.log('typeof pdfParse:', typeof pdfParse);
+console.log('pdfParse keys:', Object.keys(pdfParse));
+
+const writeFileAsync = promisify(fs.writeFile);
+const readFileAsync = promisify(fs.readFile);
+const unlinkAsync = promisify(fs.unlink);
+const mkdirAsync = promisify(fs.mkdir);
+const rmdirAsync = promisify(fs.rmdir);
+const convertAsync = promisify(libre.convert);
+const execAsync = promisify(exec);
+
+async function parsePdfText(buffer) {
+  if (typeof pdfParse === 'function') {
+    return await pdfParse(buffer);
+  }
+  if (pdfParse && typeof pdfParse.default === 'function') {
+    return await pdfParse.default(buffer);
+  }
+  if (pdfParse && typeof pdfParse.PDFParse === 'function') {
+    const parser = new pdfParse.PDFParse();
+    return await parser.parse(buffer);
+  }
+  throw new Error('pdfParse is not a function');
+}
 
 export const splitPdf = asyncHandler(async (req, res) => {
   const file = req.file;
@@ -305,6 +336,122 @@ export const pdfToJpg = asyncHandler(async (req, res) => {
       archive.append(buf, { name: `page-${idx++}.jpg` });
     }
     await archive.finalize();
+  } finally {
+    await removeDir(dir);
+  }
+});
+
+export const pptToPdf = asyncHandler(async (req, res) => {
+  const file = req.file;
+  if (!file) throw new ApiError(400, "PowerPoint file is required");
+  try {
+    const pdfBuf = await convertAsync(file.buffer, ".pdf", undefined);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="converted.pdf"`);
+    res.status(200).end(pdfBuf);
+  } catch (e) {
+    throw new ApiError(503, `Conversion failed: ${e.message}. Ensure LibreOffice is installed.`);
+  }
+});
+
+export const excelToPdf = asyncHandler(async (req, res) => {
+  const file = req.file;
+  if (!file) throw new ApiError(400, "Excel file is required");
+  try {
+    const pdfBuf = await convertAsync(file.buffer, ".pdf", undefined);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="converted.pdf"`);
+    res.status(200).end(pdfBuf);
+  } catch (e) {
+    throw new ApiError(503, `Conversion failed: ${e.message}. Ensure LibreOffice is installed.`);
+  }
+});
+
+export const pdfToExcel = asyncHandler(async (req, res) => {
+  const file = req.file;
+  if (!file) throw new ApiError(400, "PDF file is required");
+  
+  try {
+    const dir = await createTempDir();
+    const inPath = await writeTempFile(dir, "input.pdf", file.buffer);
+    const outPath = path.join(dir, "output.xlsx");
+    await pdf2excel.genXlsx(inPath, outPath, {});
+    const buf = await readFileBuffer(outPath);
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.spreadsheetml.sheet");
+    res.setHeader("Content-Disposition", `attachment; filename=\"converted.xlsx\"`);
+    res.status(200).end(buf);
+  } catch (e) {
+    console.error('pdfToExcel error:', e);
+    throw new ApiError(500, `Failed to convert PDF to Excel: ${e.message}`);
+  }
+});
+
+export const pdfToPpt = asyncHandler(async (req, res) => {
+  const file = req.file;
+  if (!file) throw new ApiError(400, "PDF file is required");
+  
+  try {
+    const dir = await createTempDir();
+    const inPath = await writeTempFile(dir, "input.pdf", file.buffer);
+    const outBase = path.join(dir, "page");
+    const bin = process.env.POPPLER_PPM_BIN || "pdftoppm";
+    try {
+      await runCmd(bin, [inPath, outBase, "-jpeg", "-r", "150"], dir);
+    } catch (e) {
+      throw new ApiError(503, `Poppler pdftoppm not available or failed: ${e.message}`);
+    }
+    const files = await listFiles(dir);
+    const jpgs = files.filter(f => f.toLowerCase().endsWith(".jpg"));
+    if (jpgs.length === 0) throw new ApiError(500, "No pages rendered from PDF");
+    const pptx = new PptxGenJS();
+    for (const f of jpgs) {
+      const buf = await readFileBuffer(f);
+      const slide = pptx.addSlide();
+      slide.addImage({ data: `data:image/jpeg;base64,${buf.toString('base64')}`, x: 0, y: 0, w: '100%', h: '100%' });
+    }
+    const buffer = await pptx.write('nodebuffer');
+    res.setHeader("Content-Type", "application/vnd.openxmlformats-officedocument.presentationml.presentation");
+    res.setHeader("Content-Disposition", `attachment; filename=\"converted.pptx\"`);
+    res.status(200).end(buffer);
+  } catch (e) {
+    throw new ApiError(500, `Failed to convert PDF to PowerPoint: ${e.message}`);
+  }
+});
+
+export const pdfToPdfA = asyncHandler(async (req, res) => {
+  const file = req.file;
+  if (!file) throw new ApiError(400, "PDF file is required");
+  const dir = await createTempDir();
+  try {
+    const inPath = await writeTempFile(dir, "input.pdf", file.buffer);
+    const outPath = path.join(dir, "output_pdfa.pdf");
+    const gs = process.env.GS_BIN || "gswin64c";
+    
+    const args = [
+      "-dPDFA=2",
+      "-dBATCH",
+      "-dNOPAUSE",
+      "-dNOOUTERSAVE",
+      "-dNOSAFER",
+      "-sProcessColorModel=DeviceRGB",
+      "-sDEVICE=pdfwrite",
+      "-dPDFACompatibilityPolicy=1",
+      `-sOutputFile=${outPath}`,
+      inPath
+    ];
+    
+    try {
+      await runCmd(gs, args, dir);
+    } catch {
+      await runCmd("gswin32c", args, dir);
+    }
+
+    const buf = await readFileBuffer(outPath);
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="converted_pdfa.pdf"`);
+    res.status(200).end(buf);
+  } catch (e) {
+    throw new ApiError(503, `Ghostscript not available or failed for PDF/A conversion: ${e.message}`);
   } finally {
     await removeDir(dir);
   }
