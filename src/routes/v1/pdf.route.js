@@ -2,11 +2,13 @@ import { Router } from "express";
 import { upload } from "../../middlewares/upload.js";
 import { 
   splitPdf, jpgToPdf, compressPdf, pdfToWord, wordToPdf, pdfToJpg, 
-  unlockPdf, removePages, lockPdf, pdfToZip, 
+  unlockPdf, removePages, lockPdf, pdfToZip, mergePdf,
   pptToPdf, excelToPdf, pdfToExcel, pdfToPpt, pdfToPdfA 
 } from "../../controllers/pdf.controller.js";
 
 const router = Router();
+
+router.post("/pdf/merge", upload.array("files", 20), mergePdf);
 
 router.post("/pdf/split", upload.single("file"), splitPdf);
 router.post("/pdf/compress", upload.single("file"), compressPdf);

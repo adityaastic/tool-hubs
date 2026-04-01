@@ -67,6 +67,29 @@ export const splitPdf = asyncHandler(async (req, res) => {
 
 export const pdfToZip = splitPdf; // Alias for PDF to ZIP
 
+export const mergePdf = asyncHandler(async (req, res) => {
+  const files = req.files;
+  if (!files || files.length < 2) throw new ApiError(400, "At least 2 PDF files are required to merge");
+
+  const merged = await PDFDocument.create();
+
+  for (const file of files) {
+    try {
+      const src = await PDFDocument.load(file.buffer);
+      const pageIndices = src.getPageIndices();
+      const pages = await merged.copyPages(src, pageIndices);
+      pages.forEach(page => merged.addPage(page));
+    } catch (e) {
+      throw new ApiError(400, `Failed to process file "${file.originalname}": ${e.message}`);
+    }
+  }
+
+  const mergedBytes = await merged.save();
+  res.setHeader("Content-Type", "application/pdf");
+  res.setHeader("Content-Disposition", `attachment; filename="merged.pdf"`);
+  res.status(200).end(Buffer.from(mergedBytes));
+});
+
 export const unlockPdf = asyncHandler(async (req, res) => {
   const file = req.file;
   const password = req.body.password || "";
@@ -213,12 +236,14 @@ const runCmd = (cmd, args, cwd) =>
 export const compressPdf = asyncHandler(async (req, res) => {
   const file = req.file;
   if (!file) throw new ApiError(400, "PDF file is required");
+
   const dir = await createTempDir();
   try {
     const inPath = await writeTempFile(dir, "input.pdf", file.buffer);
     const outPath = path.join(dir, "output.pdf");
-    const gs = process.env.GS_BIN || "gswin64c";
-    const args = [
+
+    // ── Try Ghostscript first ─────────────────────────────────────────────
+    const gsArgs = [
       "-sDEVICE=pdfwrite",
       "-dCompatibilityLevel=1.4",
       "-dPDFSETTINGS=/ebook",
@@ -228,18 +253,39 @@ export const compressPdf = asyncHandler(async (req, res) => {
       `-sOutputFile=${outPath}`,
       inPath
     ];
-    try {
-      await runCmd(gs, args, dir);
-    } catch {
-      const alt = "gswin32c";
-      await runCmd(alt, args, dir);
+
+    let compressed = false;
+    for (const gs of [process.env.GS_BIN || "gswin64c", "gswin32c", "gs"]) {
+      try {
+        await runCmd(gs, gsArgs, dir);
+        compressed = true;
+        break;
+      } catch { /* try next */ }
     }
-    const buf = await readFileBuffer(outPath);
+
+    if (compressed) {
+      const buf = await readFileBuffer(outPath);
+      res.setHeader("Content-Type", "application/pdf");
+      res.setHeader("Content-Disposition", `attachment; filename="compressed.pdf"`);
+      return res.status(200).end(buf);
+    }
+
+    // ── Fallback: pdf-lib optimisation ───────────────────────────────────
+    // Saves with object streams & removes unused objects — good for many PDFs
+    const pdfDoc = await PDFDocument.load(file.buffer);
+    const savedBytes = await pdfDoc.save({
+      useObjectStreams: true,
+      addDefaultPage: false,
+    });
+
+    const originalSize = file.buffer.length;
+    const newSize = savedBytes.length;
+
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="compressed.pdf"`);
-    res.status(200).end(buf);
-  } catch (e) {
-    throw new ApiError(503, `Ghostscript not available or failed: ${e.message}`);
+    res.setHeader("X-Original-Size", originalSize.toString());
+    res.setHeader("X-Compressed-Size", newSize.toString());
+    res.status(200).end(Buffer.from(savedBytes));
   } finally {
     await removeDir(dir);
   }
