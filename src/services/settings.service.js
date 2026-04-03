@@ -1,4 +1,4 @@
-import { Settings } from "../models/settings.model.js";
+import Settings from "../models/settings.model.js";
 
 /**
  * Get current settings
@@ -12,11 +12,11 @@ export const getSettings = async () => {
     settings = await Settings.create({
       key: "site_settings",
       general: {
-        siteName: "ToolHub",
+        siteName: "THEDAPACHECKER",
         siteDescription: "Your one-stop destination for free online tools."
       },
       footer: {
-        copyrightText: "© 2026 ToolHub. All rights reserved.",
+        copyrightText: "© 2026 THEDAPACHECKER. All rights reserved.",
         columns: [
           {
             title: "Quick Links",
@@ -66,6 +66,9 @@ export const updateSettings = async (updateBody) => {
   }
   if (updateBody.footer) {
     settings.footer = { ...settings.footer, ...updateBody.footer };
+  }
+  if (updateBody.marketing) {
+    settings.marketing = { ...settings.marketing, ...updateBody.marketing };
   }
 
   await settings.save();

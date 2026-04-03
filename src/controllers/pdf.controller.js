@@ -46,21 +46,27 @@ async function parsePdfText(buffer) {
 export const splitPdf = asyncHandler(async (req, res) => {
   const file = req.file;
   if (!file) throw new ApiError(400, "PDF file is required");
-  const pdf = await PDFDocument.load(file.buffer);
-  const total = pdf.getPageCount();
-  res.setHeader("Content-Type", "application/zip");
-  res.setHeader("Content-Disposition", `attachment; filename="split-pages.zip"`);
-  const archive = archiver("zip", { zlib: { level: 9 } });
-  archive.on("error", err => { throw err; });
-  archive.pipe(res);
-  for (let i = 0; i < total; i++) {
-    const outDoc = await PDFDocument.create();
-    const [page] = await outDoc.copyPages(pdf, [i]);
-    outDoc.addPage(page);
-    const bytes = await outDoc.save();
-    archive.append(Buffer.from(bytes), { name: `page-${i + 1}.pdf` });
+  const filePath = file.path || null;
+  try {
+    const buffer = filePath ? await readFileAsync(filePath) : file.buffer;
+    const pdf = await PDFDocument.load(buffer);
+    const total = pdf.getPageCount();
+    res.setHeader("Content-Type", "application/zip");
+    res.setHeader("Content-Disposition", `attachment; filename="split-pages.zip"`);
+    const archive = archiver("zip", { zlib: { level: 9 } });
+    archive.on("error", err => { throw err; });
+    archive.pipe(res);
+    for (let i = 0; i < total; i++) {
+      const outDoc = await PDFDocument.create();
+      const [page] = await outDoc.copyPages(pdf, [i]);
+      outDoc.addPage(page);
+      const bytes = await outDoc.save();
+      archive.append(Buffer.from(bytes), { name: `page-${i + 1}.pdf` });
+    }
+    await archive.finalize();
+  } finally {
+    if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
   }
-  archive.finalize();
 });
 
 
@@ -71,23 +77,27 @@ export const mergePdf = asyncHandler(async (req, res) => {
   const files = req.files;
   if (!files || files.length < 2) throw new ApiError(400, "At least 2 PDF files are required to merge");
 
-  const merged = await PDFDocument.create();
-
-  for (const file of files) {
-    try {
-      const src = await PDFDocument.load(file.buffer);
-      const pageIndices = src.getPageIndices();
-      const pages = await merged.copyPages(src, pageIndices);
-      pages.forEach(page => merged.addPage(page));
-    } catch (e) {
-      throw new ApiError(400, `Failed to process file "${file.originalname}": ${e.message}`);
+  const filePaths = files.map(f => f.path || null);
+  try {
+    const merged = await PDFDocument.create();
+    for (const file of files) {
+      try {
+        const buffer = file.path ? await readFileAsync(file.path) : file.buffer;
+        const src = await PDFDocument.load(buffer);
+        const pageIndices = src.getPageIndices();
+        const pages = await merged.copyPages(src, pageIndices);
+        pages.forEach(page => merged.addPage(page));
+      } catch (e) {
+        throw new ApiError(400, `Failed to process file "${file.originalname}": ${e.message}`);
+      }
     }
+    const mergedBytes = await merged.save();
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="merged.pdf"`);
+    res.status(200).end(Buffer.from(mergedBytes));
+  } finally {
+    for (const p of filePaths) if (p && fs.existsSync(p)) fs.unlinkSync(p);
   }
-
-  const mergedBytes = await merged.save();
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `attachment; filename="merged.pdf"`);
-  res.status(200).end(Buffer.from(mergedBytes));
 });
 
 export const unlockPdf = asyncHandler(async (req, res) => {
@@ -96,19 +106,19 @@ export const unlockPdf = asyncHandler(async (req, res) => {
   if (!file) throw new ApiError(400, "PDF file is required");
 
   const timestamp = Date.now();
-  const inputPath = path.join(process.cwd(), `temp_unlock_in_${timestamp}.pdf`);
+  // Use disk-uploaded path if available, otherwise write from buffer
+  const inputPath = file.path || path.join(process.cwd(), `temp_unlock_in_${timestamp}.pdf`);
   const outputPath = path.join(process.cwd(), `temp_unlock_out_${timestamp}.pdf`);
+  const wroteInput = !file.path;
 
   try {
-    fs.writeFileSync(inputPath, file.buffer);
+    if (wroteInput) fs.writeFileSync(inputPath, file.buffer);
 
-    // Use muhammara to create a new unencrypted PDF from the encrypted input
     const writer = muhammara.createWriter(outputPath);
     writer.appendPDFPagesFromPDF(inputPath, { password: password });
     writer.end();
 
     const unlockedBuffer = fs.readFileSync(outputPath);
-    
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="unlocked.pdf"`);
     res.status(200).end(unlockedBuffer);
@@ -118,52 +128,52 @@ export const unlockPdf = asyncHandler(async (req, res) => {
     }
     throw new ApiError(500, `Failed to unlock PDF: ${error.message}`);
   } finally {
-    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+    if (wroteInput && fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+    if (!wroteInput && file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
     if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
   }
 });
 
 export const removePages = asyncHandler(async (req, res) => {
   const file = req.file;
-  const pagesToRemoveStr = req.body.pages; // "1,3,5-7"
+  const pagesToRemoveStr = req.body.pages;
   if (!file) throw new ApiError(400, "PDF file is required");
   if (!pagesToRemoveStr) throw new ApiError(400, "Pages to remove are required (e.g., '1,3-5')");
 
-  const pdf = await PDFDocument.load(file.buffer);
-  const total = pdf.getPageCount();
-  
-  // Parse pages string to array of 0-based indices
-  const pagesToRemove = new Set();
-  const parts = pagesToRemoveStr.split(",");
-  for (const part of parts) {
-    if (part.includes("-")) {
-      const [start, end] = part.split("-").map(n => parseInt(n.trim()));
-      if (!isNaN(start) && !isNaN(end)) {
-        for (let i = start; i <= end; i++) pagesToRemove.add(i - 1);
+  const filePath = file.path || null;
+  try {
+    const buffer = filePath ? await readFileAsync(filePath) : file.buffer;
+    const pdf = await PDFDocument.load(buffer);
+    const total = pdf.getPageCount();
+
+    const pagesToRemove = new Set();
+    const parts = pagesToRemoveStr.split(",");
+    for (const part of parts) {
+      if (part.includes("-")) {
+        const [start, end] = part.split("-").map(n => parseInt(n.trim()));
+        if (!isNaN(start) && !isNaN(end)) {
+          for (let i = start; i <= end; i++) pagesToRemove.add(i - 1);
+        }
+      } else {
+        const page = parseInt(part.trim());
+        if (!isNaN(page)) pagesToRemove.add(page - 1);
       }
-    } else {
-      const page = parseInt(part.trim());
-      if (!isNaN(page)) pagesToRemove.add(page - 1);
     }
+
+    const indices = Array.from(pagesToRemove)
+      .filter(i => i >= 0 && i < total)
+      .sort((a, b) => b - a);
+
+    if (indices.length === 0) throw new ApiError(400, "No valid pages specified to remove");
+    for (const idx of indices) pdf.removePage(idx);
+
+    const bytes = await pdf.save();
+    res.setHeader("Content-Type", "application/pdf");
+    res.setHeader("Content-Disposition", `attachment; filename="modified.pdf"`);
+    res.status(200).end(Buffer.from(bytes));
+  } finally {
+    if (filePath && fs.existsSync(filePath)) fs.unlinkSync(filePath);
   }
-
-  // Filter valid indices
-  const indices = Array.from(pagesToRemove)
-    .filter(i => i >= 0 && i < total)
-    .sort((a, b) => b - a); // Sort descending to remove from end first
-
-  if (indices.length === 0) {
-    throw new ApiError(400, "No valid pages specified to remove");
-  }
-
-  for (const idx of indices) {
-    pdf.removePage(idx);
-  }
-
-  const bytes = await pdf.save();
-  res.setHeader("Content-Type", "application/pdf");
-  res.setHeader("Content-Disposition", `attachment; filename="modified.pdf"`);
-  res.status(200).end(Buffer.from(bytes));
 });
 
 export const lockPdf = asyncHandler(async (req, res) => {
@@ -173,11 +183,12 @@ export const lockPdf = asyncHandler(async (req, res) => {
   if (!password) throw new ApiError(400, "Password is required to lock PDF");
 
   const timestamp = Date.now();
-  const inputPath = path.join(process.cwd(), `temp_lock_in_${timestamp}.pdf`);
+  const inputPath = file.path || path.join(process.cwd(), `temp_lock_in_${timestamp}.pdf`);
   const outputPath = path.join(process.cwd(), `temp_lock_out_${timestamp}.pdf`);
+  const wroteInput = !file.path;
 
   try {
-    fs.writeFileSync(inputPath, file.buffer);
+    if (wroteInput) fs.writeFileSync(inputPath, file.buffer);
 
     const pdfDoc = new Recipe(inputPath, outputPath);
     pdfDoc.encrypt({
@@ -188,15 +199,14 @@ export const lockPdf = asyncHandler(async (req, res) => {
     pdfDoc.endPDF();
 
     const lockedBuffer = fs.readFileSync(outputPath);
-    
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="locked.pdf"`);
     res.status(200).end(lockedBuffer);
-
   } catch (error) {
     throw new ApiError(500, `Failed to lock PDF: ${error.message}`);
   } finally {
-    if (fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+    if (wroteInput && fs.existsSync(inputPath)) fs.unlinkSync(inputPath);
+    if (!wroteInput && file.path && fs.existsSync(file.path)) fs.unlinkSync(file.path);
     if (fs.existsSync(outputPath)) fs.unlinkSync(outputPath);
   }
 });
@@ -237,56 +247,71 @@ export const compressPdf = asyncHandler(async (req, res) => {
   const file = req.file;
   if (!file) throw new ApiError(400, "PDF file is required");
 
+  // file.path is set when disk storage is used (large files)
+  // file.buffer is set when memory storage is used
+  const uploadedPath = file.path || null;
+  const originalSize = file.size || (file.buffer ? file.buffer.length : 0);
+
   const dir = await createTempDir();
   try {
-    const inPath = await writeTempFile(dir, "input.pdf", file.buffer);
+    // If disk storage: use the file directly (no extra copy needed)
+    // If memory storage: write buffer to temp file
+    const inPath = uploadedPath || await writeTempFile(dir, "input.pdf", file.buffer);
     const outPath = path.join(dir, "output.pdf");
 
-    // ── Try Ghostscript first ─────────────────────────────────────────────
-    const gsArgs = [
-      "-sDEVICE=pdfwrite",
-      "-dCompatibilityLevel=1.4",
-      "-dPDFSETTINGS=/ebook",
-      "-dNOPAUSE",
-      "-dQUIET",
-      "-dBATCH",
-      `-sOutputFile=${outPath}`,
-      inPath
-    ];
-
+    // ── Try Ghostscript with progressively more aggressive settings ───────
+    const gsSettings = ["/ebook", "/screen"];
     let compressed = false;
-    for (const gs of [process.env.GS_BIN || "gswin64c", "gswin32c", "gs"]) {
-      try {
-        await runCmd(gs, gsArgs, dir);
-        compressed = true;
-        break;
-      } catch { /* try next */ }
+
+    for (const setting of gsSettings) {
+      if (compressed) break;
+      const gsArgs = [
+        "-sDEVICE=pdfwrite",
+        "-dCompatibilityLevel=1.4",
+        `-dPDFSETTINGS=${setting}`,
+        "-dNOPAUSE",
+        "-dQUIET",
+        "-dBATCH",
+        "-dDetectDuplicateImages=true",
+        "-dCompressFonts=true",
+        `-sOutputFile=${outPath}`,
+        inPath,
+      ];
+
+      for (const gs of [process.env.GS_BIN || "gswin64c", "gswin32c", "gs"]) {
+        try {
+          await runCmd(gs, gsArgs, dir);
+          compressed = true;
+          break;
+        } catch { /* try next binary */ }
+      }
     }
 
     if (compressed) {
-      const buf = await readFileBuffer(outPath);
+      const compressedSize = fs.statSync(outPath).size;
       res.setHeader("Content-Type", "application/pdf");
       res.setHeader("Content-Disposition", `attachment; filename="compressed.pdf"`);
-      return res.status(200).end(buf);
+      res.setHeader("X-Original-Size", originalSize.toString());
+      res.setHeader("X-Compressed-Size", compressedSize.toString());
+      // Stream the file directly to avoid loading entire compressed PDF into memory
+      const readStream = fs.createReadStream(outPath);
+      readStream.pipe(res);
+      return;
     }
 
     // ── Fallback: pdf-lib optimisation ───────────────────────────────────
-    // Saves with object streams & removes unused objects — good for many PDFs
-    const pdfDoc = await PDFDocument.load(file.buffer);
-    const savedBytes = await pdfDoc.save({
-      useObjectStreams: true,
-      addDefaultPage: false,
-    });
-
-    const originalSize = file.buffer.length;
-    const newSize = savedBytes.length;
+    const buffer = uploadedPath ? await readFileAsync(uploadedPath) : file.buffer;
+    const pdfDoc = await PDFDocument.load(buffer);
+    const savedBytes = await pdfDoc.save({ useObjectStreams: true, addDefaultPage: false });
 
     res.setHeader("Content-Type", "application/pdf");
     res.setHeader("Content-Disposition", `attachment; filename="compressed.pdf"`);
     res.setHeader("X-Original-Size", originalSize.toString());
-    res.setHeader("X-Compressed-Size", newSize.toString());
+    res.setHeader("X-Compressed-Size", savedBytes.length.toString());
     res.status(200).end(Buffer.from(savedBytes));
   } finally {
+    // Clean up multer's disk-uploaded temp file
+    if (uploadedPath && fs.existsSync(uploadedPath)) fs.unlinkSync(uploadedPath);
     await removeDir(dir);
   }
 });

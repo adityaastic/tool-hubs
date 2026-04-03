@@ -1,4 +1,4 @@
-import { StaticPage } from "../models/staticPage.model.js";
+import StaticPage from "../models/staticPage.model.js";
 import { ApiError } from "../utils/apiError.js";
 
 /**

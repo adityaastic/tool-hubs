@@ -9,13 +9,13 @@ const settingsSchema = new mongoose.Schema(
       default: "site_settings"
     },
     general: {
-      siteName: { type: String, default: "ToolHub" },
+      siteName: { type: String, default: "thedapachecker" },
       siteDescription: { type: String, default: "Your one-stop destination for free online tools." },
       logoUrl: { type: String, default: "" },
       faviconUrl: { type: String, default: "" }
     },
     footer: {
-      copyrightText: { type: String, default: "© 2026 ToolHub. All rights reserved." },
+      copyrightText: { type: String, default: "© 2026 thedapachecker. All rights reserved." },
       columns: [
         {
           title: { type: String, default: "Quick Links" },
@@ -33,6 +33,13 @@ const settingsSchema = new mongoose.Schema(
       socialLinks: [
         { name: { type: String }, icon: { type: String }, href: { type: String } }
       ]
+    },
+    marketing: {
+      googleTagManagerId: { type: String, default: "" },
+      googleAnalyticsId: { type: String, default: "" },
+      metaPixelId: { type: String, default: "" },
+      headerScripts: { type: String, default: "" },
+      footerScripts: { type: String, default: "" }
     }
   },
   { 
@@ -41,4 +48,5 @@ const settingsSchema = new mongoose.Schema(
   }
 );
 
-export const Settings = mongoose.model("Settings", settingsSchema);
+const Settings = mongoose.model("Settings", settingsSchema);
+export default Settings;

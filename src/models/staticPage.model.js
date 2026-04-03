@@ -36,4 +36,5 @@ const staticPageSchema = new mongoose.Schema(
   }
 );
 
-export const StaticPage = mongoose.model("StaticPage", staticPageSchema);
+const StaticPage = mongoose.model("StaticPage", staticPageSchema);
+export default StaticPage;
