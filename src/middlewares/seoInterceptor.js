@@ -162,7 +162,7 @@ export const seoInterceptor = async (req, res, next) => {
         ? articleFallback.description.replace(/<[^>]*>?/gm, '').trim()
         : "";
 
-      const titleToInject = metaTitle || articleFallback.title || "THEDAPACHECKER";
+      const titleToInject = metaTitle || articleFallback.title || "thedapachecker";
       const descToInject = metaDescription || rawDescription;
 
       // 1. Replace <title>

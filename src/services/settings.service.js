@@ -12,11 +12,11 @@ export const getSettings = async () => {
     settings = await Settings.create({
       key: "site_settings",
       general: {
-        siteName: "THEDAPACHECKER",
+        siteName: "thedapachecker",
         siteDescription: "Your one-stop destination for free online tools."
       },
       footer: {
-        copyrightText: "© 2026 THEDAPACHECKER. All rights reserved.",
+        copyrightText: "© 2026 thedapachecker. All rights reserved.",
         columns: [
           {
             title: "Quick Links",
